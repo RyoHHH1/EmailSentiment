@@ -1,0 +1,124 @@
+import imaplib
+import email
+from email.header import decode_header
+import time
+from transformers import pipeline, BertTokenizer
+
+# メール接続の設定
+IMAP_SERVER = "imap.gmail.com"
+EMAIL = "your_email_address"
+PASSWORD = "your_email_password"
+
+# 感情分析モデルの初期化
+sentiment_analyzer = pipeline("sentiment-analysis")
+tokenizer = BertTokenizer.from_pretrained("distilbert-base-uncased")
+
+def connect_to_inbox():
+    try:
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+        mail.login(EMAIL, PASSWORD)
+        mail.select("inbox")
+        print("メールボックスに接続しました。")
+        return mail
+    except Exception as e:
+        print(f"接続エラー: {e}")
+        return None
+
+def get_latest_email_id(mail):
+    try:
+        mail.select('INBOX')
+        _, search_data = mail.search(None, 'ALL')
+        mail_ids = search_data[0].split()
+        return int(mail_ids[-1])
+    except Exception as e:
+        print(f"最新メールID取得エラー: {e}")
+        return None
+
+def get_email_by_id(mail, email_id):
+    try:
+        _, msg = mail.fetch(str(email_id), "(RFC822)")
+        return email.message_from_bytes(msg[0][1])
+    except Exception as e:
+        print(f"メール取得エラー: {e}")
+        return None
+
+def extract_email_content(email_message):
+    try:
+        subject = decode_header(email_message["Subject"])[0][0]
+        if isinstance(subject, bytes):
+            subject = subject.decode()
+
+        body = ""
+        if email_message.is_multipart():
+            for part in email_message.walk():
+                if part.get_content_type() == "text/plain":
+                    body = part.get_payload(decode=True).decode()
+                    break
+        else:
+            body = email_message.get_payload(decode=True).decode()
+
+        return f"Subject: {subject}\n\nBody: {body}"
+    except Exception as e:
+        print(f"メール内容抽出エラー: {e}")
+        return ""
+
+def analyze_sentiment(text):
+    try:
+        max_length = 512
+        tokens = tokenizer.tokenize(text)
+        chunks = [tokens[i:i + max_length] for i in range(0, len(tokens), max_length)]
+
+        results = []
+        for chunk in chunks:
+            chunk_text = tokenizer.convert_tokens_to_string(chunk)
+            result = sentiment_analyzer(chunk_text)[0]
+            results.append(result)
+
+        if results:
+            avg_label = max(set(r['label'] for r in results), key=[r['label'] for r in results].count)
+            avg_score = sum(r['score'] for r in results) / len(results)
+            return avg_label, avg_score
+        else:
+            return "NEUTRAL", 0.0
+    except Exception as e:
+        print(f"感情分析エラー: {e}")
+        return "ERROR", 0.0
+
+def main():
+    last_id = None
+    while True:
+        mail = connect_to_inbox()
+        if not mail:
+            time.sleep(60)
+            continue
+
+        print("最新メールをチェックしています...")
+
+        current_id = get_latest_email_id(mail)
+
+        if current_id is not None and current_id != last_id:
+            print(f"\n新着メールID: {current_id}")
+
+            email_message = get_email_by_id(mail, current_id)
+            if not email_message:
+                print("メールの取得に失敗しました。")
+            else:
+                content = extract_email_content(email_message)
+
+                print("メール内容:")
+                print(content)
+
+                sentiment, confidence = analyze_sentiment(content)
+
+                notification = f"感情分析結果: {sentiment} (確信度: {confidence:.2f})"
+                print(notification)
+
+            last_id = current_id
+        else:
+            print("新着メールはありません。")
+
+        mail.logout()
+        time.sleep(10)  # 1分ごとにチェック
+
+if __name__ == "__main__":
+    main()
